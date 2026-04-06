@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GFS TRADES • Pro</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body { margin:0; font-family: system-ui, sans-serif; background:#0a0a0a; color:#ddd; font-size:13px; overflow:hidden; }
+  input, button, select, textarea { padding:6px 9px; border:none; border-radius:4px; font-size:13px; box-sizing:border-box; }
+  button { cursor:pointer; font-weight:600; }
+  .buy { background:#00c853; color:#000; }
+  .sell { background:#ff1744; color:#fff; }
+  .active { border:2px solid #00ff9d !important; }
+  .panel { background:#121212; border-radius:5px; padding:10px; }
+  .logo { font-size:21px; font-weight:900; background:linear-gradient(90deg,#00ff9d,#00ccff); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+  .profit { color:#00ff9d; }
+  .status { position:fixed; bottom:15px; left:50%; transform:translateX(-50%); background:#1f1f1f; padding:10px 22px; border-radius:50px; box-shadow:0 10px 25px rgba(0,0,0,0.9); z-index:1000; font-size:14px; }
+  table { width:100%; border-collapse:collapse; font-size:12.8px; }
+  th, td { padding:7px 6px; text-align:left; border-bottom:1px solid #222; }
+  th { color:#999; font-weight:500; }
+  .watchlist-item { padding:8px 10px; margin-bottom:3px; border-radius:5px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; }
+  .toggle { display:flex; background:#222; border-radius:30px; padding:3px; width:160px; }
+  .toggle div { flex:1; text-align:center; padding:4px 12px; border-radius:30px; transition:0.3s; }
+  .toggle .active-mode { background:#00c853; color:#000; font-weight:bold; }
+  .note-item { background:#1a1a1a; padding:10px; border-radius:5px; margin-bottom:8px; position:relative; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [authForm, setAuthForm] = useState({email:"", password:""});
+  const [isRegister, setIsRegister] = useState(false);
+
+  const [watchlist, setWatchlist] = useState(["EUR_USD", "USD_JPY", "GBP_USD", "XAU_USD"]);
+  const [selectedSymbol, setSelectedSymbol] = useState("EUR_USD");
+  const [prices, setPrices] = useState({EUR_USD:1.1427, USD_JPY:149.85, GBP_USD:1.3548, XAU_USD:1826.50});
+  
+  const [trades, setTrades] = useState([]);
+  const [form, setForm] = useState({type:"BUY", lot:"1.0", sl:"", tp:""});
+  
+  const [accountBalance, setAccountBalance] = useState(25000);
+  const [walletBalance, setWalletBalance] = useState(5000);
+
+  const [tradingMode, setTradingMode] = useState("Demo");
+  const [oandaToken, setOandaToken] = useState("");
+  const [oandaAccountId, setOandaAccountId] = useState("");
+  const [connected, setConnected] = useState(false);
+
+  const [newSymbol, setNewSymbol] = useState("");
+  const [statusMsg, setStatusMsg] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [showBalanceEdit, setShowBalanceEdit] = useState(false);
+  const [newBalanceInput, setNewBalanceInput] = useState(25000);
+
+  // New features
+  const [notes, setNotes] = useState([]);
+  const [newNoteText, setNewNoteText] = useState("");
+  const [showNotes, setShowNotes] = useState(false);
+  const [showCalculator, setShowCalculator] = useState(false);
+  const [calcRiskPercent, setCalcRiskPercent] = useState(1);
+  const [calcStopPips, setCalcStopPips] = useState(20);
+  const [calcLotResult, setCalcLotResult] = useState(0);
+  const [showWallet, setShowWallet] = useState(false);   // ← Fixed missing state
+
+  const showStatus = (msg) => {
+    setStatusMsg(msg);
+    setTimeout(() => setStatusMsg(""), 2800);
+  };
+
+  const formatPrice = (symbol, price) => {
+    if (!price) return "—";
+    return price.toFixed(symbol.includes("JPY") || symbol.includes("XAU") ? 2 : 4);
+  };
+
+  // Notes persistence
+  useEffect(() => {
+    const saved = localStorage.getItem("gfsNotes");
+    if (saved) setNotes(JSON.parse(saved));
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("gfsNotes", JSON.stringify(notes));
+  }, [notes]);
+
+  const addNote = () => {
+    if (!newNoteText.trim()) return;
+    setNotes(prev => [{id: Date.now(), time: new Date().toLocaleString(), text: newNoteText.trim()}, ...prev]);
+    setNewNoteText("");
+    showStatus("Note saved");
+  };
+
+  const deleteNote = (id) => {
+    if (confirm("Delete this note?")) setNotes(prev => prev.filter(n => n.id !== id));
+  };
+
+  const calculateLot = () => {
+    const risk = accountBalance * (calcRiskPercent / 100);
+    const lot = Math.max(0.01, parseFloat((risk / (calcStopPips * 10)).toFixed(2)));
+    setCalcLotResult(lot);
+  };
+
+  // Price updater (fixed + parallel)
+  useEffect(() => {
+    let interval;
+    if (tradingMode === "Demo") {
+      interval = setInterval(() => {
+        setPrices(prev => {
+          const updated = {...prev};
+          watchlist.forEach(sym => {
+            const vol = sym.includes("JPY") ? 0.08 : sym.includes("XAU") ? 1.2 : 0.0008;
+            updated[sym] = parseFloat((prev[sym] + (Math.random()-0.495)*vol).toFixed(4));
+          });
+          return updated;
+        });
+      }, 1200);
+    } else if (tradingMode === "Live" && connected) {
+      interval = setInterval(async () => {
+        const newPrices = {...prices};
+        const promises = watchlist.map(async sym => {
+          try {
+            const res = await axios.get(`https://api-fxpractice.oanda.com/v3/instruments/${sym}/candles?count=1&granularity=S5`, {
+              headers: { Authorization: `Bearer ${oandaToken}` }
+            });
+            newPrices[sym] = parseFloat(res.data.candles[0].mid.c);
+          } catch(e){}
+        });
+        await Promise.all(promises);
+        setPrices(newPrices);
+      }, 2500);
+    }
+    return () => clearInterval(interval);
+  }, [tradingMode, connected, watchlist, oandaToken]);
+
+  const connectOanda = async () => {
+    if (!oandaToken || !oandaAccountId) return showStatus("Enter Token + Account ID");
+    try {
+      await axios.get(`https://api-fxpractice.oanda.com/v3/accounts/${oandaAccountId}`, { headers: { Authorization: `Bearer ${oandaToken}` }});
+      setConnected(true);
+      setTradingMode("Live");
+      showStatus("✅ Connected to OANDA");
+    } catch (e) {
+      showStatus("❌ Failed – check credentials");
+    }
+  };
+
+  const handleAuth = () => {
+    if (!authForm.email || !authForm.password) return alert("Email and password required");
+    const users = JSON.parse(localStorage.getItem("users") || "[]");
+    if (isRegister) {
+      if (users.find(u => u.email === authForm.email)) return alert("Email already exists");
+      users.push({...authForm});
+      localStorage.setItem("users", JSON.stringify(users));
+      setUser(authForm);
+      showStatus("Account created");
+    } else {
+      const found = users.find(u => u.email === authForm.email && u.password === authForm.password);
+      if (found) setUser(found);
+      else showStatus("Invalid login");
+    }
+  };
+
+  const logout = () => { if (confirm("Logout?")) setUser(null); };
+
+  const executeTrade = () => {
+    const lot = parseFloat(form.lot);
+    if (!lot || lot <= 0) return showStatus("Invalid lot size");
+    const entry = prices[selectedSymbol] || 0;
+    const newTrade = { id: Date.now(), symbol: selectedSymbol, type: form.type, entry: entry.toFixed(4), lot: lot.toFixed(2), date: new Date().toLocaleString() };
+    setTrades(prev => [newTrade, ...prev]);
+    showStatus(`${form.type} ${lot} ${selectedSymbol} executed`);
+    setForm({type:"BUY", lot:"1.0", sl:"", tp:""});
+  };
+
+  const closeTrade = (id) => {
+    const trade = trades.find(t => t.id === id);
+    if (!trade) return;
+    const closePrice = prices[trade.symbol];
+    const dir = trade.type === "BUY" ? 1 : -1;
+    const multiplier = trade.symbol.includes("JPY") ? 100 : 10000;
+    const pips = (closePrice - parseFloat(trade.entry)) * dir * multiplier;
+    const pl = (pips * parseFloat(trade.lot) * 10).toFixed(2);
+    setAccountBalance(prev => prev + parseFloat(pl));
+    setTrades(prev => prev.filter(t => t.id !== id));
+    showStatus(`Closed | P/L: $${pl}`);
+  };
+
+  const addToWatchlist = () => {
+    const sym = newSymbol.trim().toUpperCase();
+    if (!sym || watchlist.includes(sym)) return;
+    setWatchlist([...watchlist, sym]);
+    let initPrice = sym.includes("JPY") ? 145 : sym.includes("XAU") ? 2650 : 1.1;
+    setPrices(prev => ({...prev, [sym]: initPrice}));
+    setNewSymbol("");
+  };
+
+  const removeFromWatchlist = (sym) => {
+    if (watchlist.length === 1) return;
+    setWatchlist(watchlist.filter(s => s !== sym));
+    if (selectedSymbol === sym) setSelectedSymbol(watchlist[0]);
+  };
+
+  // Wallet
+  const depositToWallet = () => { const amt = 1000; setWalletBalance(p => p + amt); showStatus(`Deposited $${amt}`); };
+  const cashoutFromWallet = () => { const amt = 1000; if (amt <= walletBalance) { setWalletBalance(p => p - amt); showStatus(`Cashout $${amt}`); } };
+  const transferToTrading = () => { const amt = 1000; if (amt <= walletBalance) { setWalletBalance(p => p - amt); setAccountBalance(p => p + amt); showStatus(`Transferred $${amt} to trading`); } };
+
+  if (!user) {
+    return (
+      <div style={{height:"100vh", display:"flex", justifyContent:"center", alignItems:"center", background:"#0a0a0a"}}>
+        <div style={{background:"#1f1f1f", padding:35, borderRadius:10, width:380, textAlign:"center"}}>
+          <div className="logo" style={{fontSize:28, marginBottom:15}}>GFS TRADES • Pro</div>
+          <h3 style={{marginBottom:20}}>{isRegister ? "Register" : "Login"}</h3>
+          <input placeholder="Email" value={authForm.email} onChange={e => setAuthForm({...authForm, email:e.target.value})} style={{width:"100%", marginBottom:10}} />
+          <input type="password" placeholder="Password" value={authForm.password} onChange={e => setAuthForm({...authForm, password:e.target.value})} style={{width:"100%", marginBottom:20}} />
+          <button onClick={handleAuth} style={{width:"100%", background:"#00c853", padding:12, fontSize:16}}>
+            {isRegister ? "Create Account" : "Login"}
+          </button>
+          
+          {/* Quick bypass if login is stuck */}
+          <button onClick={() => setUser({email:"demo@user.com"})} style={{width:"100%", background:"#333", marginTop:10, padding:12}}>
+            Quick Demo Login (skip)
+          </button>
+
+          <p style={{marginTop:15, color:"#88ffcc", cursor:"pointer"}} onClick={() => setIsRegister(!isRegister)}>
+            {isRegister ? "Already have account? Login" : "New? Register here"}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{display:"flex", flexDirection:"column", height:"100vh", background:"#0a0a0a"}}>
+      {/* Top Bar */}
+      <div style={{padding:"8px 16px", background:"#111", display:"flex", justifyContent:"space-between", alignItems:"center", borderBottom:"1px solid #222"}}>
+        <div className="logo">GFS TRADES • Pro</div>
+        <div style={{display:"flex", alignItems:"center", gap:15}}>
+          <div className="toggle">
+            <div onClick={() => { setTradingMode("Demo"); setConnected(false); }} className={tradingMode === "Demo" ? "active-mode" : ""}>Demo</div>
+            <div onClick={() => { if (!connected) setShowSettings(true); setTradingMode("Live"); }} className={tradingMode === "Live" ? "active-mode" : ""}>Live</div>
+          </div>
+
+          <div style={{cursor:"pointer"}} onClick={() => setShowWallet(true)}>Wallet: <span className="profit">${walletBalance.toFixed(2)}</span></div>
+          <div>Balance: <span className="profit">${accountBalance.toFixed(2)}</span></div>
+
+          <button onClick={() => setShowNotes(true)} style={{background:"#00ccff", padding:"5px 12px"}}>Notes</button>
+          <button onClick={() => setShowCalculator(true)} style={{background:"#ff9800", padding:"5px 12px"}}>Calc</button>
+          <button onClick={() => setShowSettings(true)} style={{background:"#333", padding:"5px 12px"}}>OANDA</button>
+        </div>
+        <button onClick={logout} style={{background:"#440000", padding:"6px 16px"}}>Logout</button>
+      </div>
+
+      {/* Rest of your original dashboard (watchlist, chart, trade panel, positions) */}
+      <div style={{display:"flex", flex:1, overflow:"hidden"}}>
+        <div style={{width:220, background:"#111", overflowY:"auto", padding:10, borderRight:"1px solid #222"}}>
+          <div style={{fontWeight:"bold", marginBottom:8}}>Watchlist <span style={{fontSize:"11px", color:"#777"}}>{watchlist.length} pairs</span></div>
+          {watchlist.map(s => (
+            <div key={s} onClick={() => setSelectedSymbol(s)} className="watchlist-item" style={{background: selectedSymbol === s ? "#1e3a2f" : "#1a1a1a"}}>
+              <span>{s}</span>
+              <span style={{color:"#bbb"}}>{formatPrice(s, prices[s])}</span>
+              <span onClick={e => {e.stopPropagation(); removeFromWatchlist(s);}} style={{color:"#f66", marginLeft:8}}>×</span>
+            </div>
+          ))}
+          <div style={{marginTop:15, display:"flex", gap:5}}>
+            <input placeholder="Add pair" value={newSymbol} onChange={e => setNewSymbol(e.target.value.toUpperCase())} style={{flex:1}} />
+            <button onClick={addToWatchlist}>+</button>
+          </div>
+        </div>
+
+        <div style={{flex:1, display:"flex", flexDirection:"column", padding:10, gap:10}}>
+          <div style={{padding:"6px 12px", background:"#121212", borderRadius:6, display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+            <div style={{fontSize:"19.5px", fontWeight:"bold"}}>{selectedSymbol} <span style={{fontSize:"16px", color:"#aaa"}}>{formatPrice(selectedSymbol, prices[selectedSymbol])}</span></div>
+            <div style={{display:"flex", gap:8}}>
+              <button onClick={() => setForm({...form, type:"BUY"})} className={`buy ${form.type==="BUY" ? "active" : ""}`} style={{padding:"7px 22px"}}>BUY</button>
+              <button onClick={() => setForm({...form, type:"SELL"})} className={`sell ${form.type==="SELL" ? "active" : ""}`} style={{padding:"7px 22px"}}>SELL</button>
+            </div>
+          </div>
+
+          <div style={{flex:1, minHeight:"390px", background:"#0f0f0f", borderRadius:6, overflow:"hidden"}}>
+            <iframe src={`https://www.tradingview.com/widgetembed/?symbol=${selectedSymbol.replace('_','')}&interval=5&theme=dark&style=1&hide_side_toolbar=0&hide_top_toolbar=1`} style={{width:"100%", height:"100%", border:"none"}} title="Chart"></iframe>
+          </div>
+
+          <div className="panel">
+            <div style={{display:"flex", gap:8, alignItems:"center", flexWrap:"wrap"}}>
+              <input type="number" step="0.01" value={form.lot} onChange={e => setForm({...form, lot:e.target.value})} placeholder="Lot" style={{width:80}} />
+              <input type="number" step="0.0001" value={form.sl} onChange={e => setForm({...form, sl:e.target.value})} placeholder="SL" style={{width:100}} />
+              <input type="number" step="0.0001" value={form.tp} onChange={e => setForm({...form, tp:e.target.value})} placeholder="TP" style={{width:100}} />
+              <button onClick={executeTrade} style={{background:"#00c853", color:"#000", padding:"9px 32px", fontSize:"14.5px", fontWeight:"bold", flex:1}}>EXECUTE {form.type}</button>
+            </div>
+          </div>
+
+          <div className="panel" style={{flex:1, overflow:"auto"}}>
+            <div style={{fontWeight:"bold", marginBottom:6}}>Open Positions ({trades.length})</div>
+            <table>
+              <thead><tr><th>Symbol</th><th>Type</th><th>Lot</th><th>Entry</th><th>Current</th><th>P/L</th><th></th></tr></thead>
+              <tbody>
+                {trades.map(t => {
+                  const current = prices[t.symbol];
+                  const dir = t.type === "BUY" ? 1 : -1;
+                  const multiplier = t.symbol.includes("JPY") ? 100 : 10000;
+                  const pips = (current - parseFloat(t.entry)) * dir * multiplier;
+                  const pl = (pips * parseFloat(t.lot) * 10).toFixed(2);
+                  return <tr key={t.id}>
+                    <td><strong>{t.symbol}</strong></td>
+                    <td style={{color: t.type==="BUY" ? "#00ff9d" : "#ff1744"}}>{t.type}</td>
+                    <td>{t.lot}</td>
+                    <td>{t.entry}</td>
+                    <td>{formatPrice(t.symbol, current)}</td>
+                    <td style={{color: pl >= 0 ? "#00ff9d" : "#ff1744", fontWeight:"bold"}}>${pl}</td>
+                    <td><button onClick={() => closeTrade(t.id)} style={{background:"#ff1744", padding:"5px 12px", fontSize:"12px"}}>Close</button></td>
+                  </tr>;
+                })}
+                {trades.length === 0 && <tr><td colSpan="7" style={{textAlign:"center", padding:25, color:"#666"}}>No open trades yet</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {/* All modals (Notes, Calculator, Wallet, etc.) */}
+      {/* Notes Modal */}
+      {showNotes && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:9999}}>
+          <div style={{background:"#1f1f1f", padding:25, borderRadius:10, width:520, maxHeight:"85vh"}}>
+            <h3>📝 Trading Notes</h3>
+            <div style={{display:"flex", gap:8, marginBottom:15}}>
+              <textarea value={newNoteText} onChange={e => setNewNoteText(e.target.value)} placeholder="Write note here..." style={{flex:1, height:90}} />
+              <button onClick={addNote} style={{background:"#00c853", padding:"0 20px"}}>Save</button>
+            </div>
+            <div style={{maxHeight:400, overflow:"auto"}}>
+              {notes.map(n => (
+                <div key={n.id} className="note-item">
+                  <small>{n.time}</small>
+                  <p>{n.text}</p>
+                  <button onClick={() => deleteNote(n.id)} style={{position:"absolute", top:8, right:8, background:"#ff1744", fontSize:11}}>×</button>
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setShowNotes(false)} style={{marginTop:15, background:"#555", width:"100%", padding:12}}>Close</button>
+          </div>
+        </div>
+      )}
+
+      {/* Calculator Modal */}
+      {showCalculator && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:9999}}>
+          <div style={{background:"#1f1f1f", padding:25, borderRadius:10, width:400}}>
+            <h3>🧮 Risk Calculator</h3>
+            <label>Risk %</label>
+            <input type="number" step="0.1" value={calcRiskPercent} onChange={e => setCalcRiskPercent(e.target.value)} style={{width:"100%"}} />
+            <label style={{marginTop:10}}>Stop Loss (pips)</label>
+            <input type="number" value={calcStopPips} onChange={e => setCalcStopPips(e.target.value)} style={{width:"100%"}} />
+            <button onClick={calculateLot} style={{background:"#00c853", width:"100%", padding:12, marginTop:15}}>Calculate Lot</button>
+            {calcLotResult > 0 && <div style={{textAlign:"center", marginTop:15, fontSize:18}}>Recommended Lot: <strong>{calcLotResult}</strong></div>}
+            <button onClick={() => setShowCalculator(false)} style={{marginTop:20, background:"#555", width:"100%", padding:12}}>Close</button>
+          </div>
+        </div>
+      )}
+
+      {/* Wallet Modal */}
+      {showWallet && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:9999}}>
+          <div style={{background:"#1f1f1f", padding:25, borderRadius:10, width:420}}>
+            <h3>💰 Wallet</h3>
+            <p style={{fontSize:18}}>Balance: <span className="profit">${walletBalance.toFixed(2)}</span></p>
+            <div style={{display:"flex", gap:10, marginTop:15, flexDirection:"column"}}>
+              <button onClick={depositToWallet} style={{background:"#00c853", padding:12}}>Deposit $1000</button>
+              <button onClick={cashoutFromWallet} style={{background:"#ff1744", padding:12}}>Cashout $1000</button>
+              <button onClick={transferToTrading} style={{background:"#00ccff", color:"#000", padding:12}}>Transfer $1000 to Trading</button>
+              <button onClick={() => setShowWallet(false)} style={{background:"#555", padding:12}}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Original modals (balance edit & settings) unchanged */}
+      {showBalanceEdit && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:9999}}>
+          <div style={{background:"#1f1f1f", padding:25, borderRadius:10, width:340}}>
+            <h3>Edit Demo Balance</h3>
+            <input type="number" value={newBalanceInput} onChange={e => setNewBalanceInput(e.target.value)} style={{width:"100%", padding:12, fontSize:18, margin:"15px 0"}} />
+            <div style={{display:"flex", gap:10}}>
+              <button onClick={() => {setAccountBalance(parseFloat(newBalanceInput)||25000); setShowBalanceEdit(false); showStatus("Balance updated");}} style={{flex:1, background:"#00c853", padding:12}}>Save</button>
+              <button onClick={() => setShowBalanceEdit(false)} style={{flex:1, background:"#555", padding:12}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSettings && (
+        <div style={{position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:9999}}>
+          <div style={{background:"#1f1f1f", padding:25, borderRadius:10, width:440}}>
+            <h3>OANDA Broker Connection</h3>
+            <select value={tradingMode} onChange={e => setTradingMode(e.target.value)} style={{width:"100%", marginBottom:15}}>
+              <option value="Demo">Demo</option>
+              <option value="Live">Live OANDA</option>
+            </select>
+            <input type="password" value={oandaToken} onChange={e => setOandaToken(e.target.value)} placeholder="API Token" style={{width:"100%", marginBottom:15}} />
+            <input value={oandaAccountId} onChange={e => setOandaAccountId(e.target.value)} placeholder="Account ID" style={{width:"100%", marginBottom:20}} />
+            <div style={{display:"flex", gap:10}}>
+              {tradingMode === "Live" && !connected && <button onClick={connectOanda} style={{flex:1, background:"#00c853", padding:12}}>Connect</button>}
+              {connected && <button onClick={() => {setConnected(false); setTradingMode("Demo"); showStatus("Disconnected");}} style={{flex:1, background:"#ff1744", padding:12}}>Disconnect</button>}
+              <button onClick={() => setShowSettings(false)} style={{flex:1, background:"#555", padding:12}}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {statusMsg && <div className="status">{statusMsg}</div>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
